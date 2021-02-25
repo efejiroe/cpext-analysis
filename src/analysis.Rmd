@@ -1,0 +1,909 @@
+---
+title: "Analysis Report of Pathogen X"
+author: "Efejiro Ashano"
+date: "Created 25-02-2021"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+## Overview
+
+The six tasks given in the brief form the basis of the organizational structure of this markdown. These tasks given include:
+
+1. To clean and append the two infection tables given
+
+2. To de-duplicate the merged tables
+
+3. Find an appropriate UK population data source with the geography codes given
+
+4. Present the positive infection counts as a weekly Epidemiological Curves per year
+
+5. Calculate and visualise positive infection rates per 100,000 population per year and region
+
+6. Calculate summary statistics for reporting delays between sample and reporting dates by NHS Trust and specimen type.
+
+### Setup
+
+Libraries and global settings are detailed below. 
+
+```{r setup, include=TRUE}
+# Loads required packages.
+library(knitr)
+library(rmdformats)
+library(formattable)
+library(readxl)
+library(formatR)
+library(incidence2)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(janitor)
+library(dplyr)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+## Cleaning and merging the datasets
+
+In the data cleaning and merging task:
+
+1. The datasets were read and loaded from the project folder. The package **readxl** is used to load the excel file in this case.
+
+2. The datasets tables, their structure and contents, were previewed in their native state. Cleaning notes were also summarised here.
+
+```{r A1, echo=TRUE}
+# Loads infections datasets
+region1_df <- read_excel("../data/Region_1_data.xlsx")
+region2_df <- read.csv("../data/Region_2_data.csv", sep = ",", quote="\"")
+
+# Previews table headers in Region 1 dataset
+head(region1_df, 4)
+# Preview structure of Region 1 dataset
+str(region1_df)
+# Previews table headers in Region 2 dataset 
+head(region2_df, 4)
+# Preview structure of Region 1 dataset
+str(region2_df)
+```
+From the preview, it was found that the correct header information was listed in the 3rd row with the first 2 rows containing title information that was not needed. This preview also showed that: 
+
+1. Date columns in Region 1 were also in a wrong format. This is common with Excel imports.
+
+2. Region 1 and Region 2 dataframes had different column types and names. Uniform data types and names are important for the merge.
+
+The unique values in each of the columns holding "factor" data was also visualise to further understand the datasets. Before this was done however, the Region 1 data set header information was removed using the **Janitor** package.
+
+```{r A2-1, echo=TRUE}
+# Adjusts header information in Region 1 data frame with the "janitor" package.
+region1_df <- janitor::row_to_names(region1_df, 2)
+```
+
+Unique values for the region 1 dataset is as follows:
+
+```{r A2-2, echo=TRUE}
+# creates and outputs unique values of selected columns from the Region 1 dataset.
+unique_list1 <- lapply(region1_df[,6:11], unique)
+unique_list1
+```
+Unique values for the region 2 dataset is as follows:
+
+```{r A2-3, echo=TRUE}
+# Creates and outputs unique values of selected columns in the Region 2 dataset
+unique_list2 <- lapply(region2_df[,c(2, 6, 7, 8, 9, 10)], unique)
+unique_list2
+```
+
+#### Preliminary transformations of dataframes
+
+Abbreviations definitions assumed from the infection datasets are summarised in the table below:
+
+```{r A3, echo=TRUE}
+# Displays table using the formattable package
+abbr <- data.frame(
+  SN = 1:10,
+  Abbreviation = c("CM", "EH", "GP", "HMP", "HPT", 
+    "IP", "OP", "NA", "PHE", "Trust 'X'"), 
+  Name = c("Community Matron", "Environmental Health", "General Practitioner", "Her Majesty's Prisons", "Health Protection Team", 
+    "Inpatient", "Outpatient", "Not Applicable", "Public Health England", "'X' NHS Trusts"),
+  stringsAsFactors = FALSE)
+
+formattable(abbr, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+```
+
+The first set of data transformation was done to normalise factor values in the two infection datasets. This was done as follows:
+
+**In the Region 1 dataset**:
+
+1. All "NHS Trusts" in the were designated "Trusts"
+
+2. All "Positive" and "Negative" values were designated in uppercase
+
+3. All "Inpatient" and "Outpatients" were shortened and designated "IP" and "OP"
+
+4. "Unknown" in the In-out patient indicator columns only were transformed to *NA* i.e. not available ("Unknown values in the Requesting_organization column of the Region 2 dataset was assumed to be an "unknown Trust" since it had corresponding information in other columns that support this).
+
+These transformations occurred as follows:
+
+```{r A4-1, echo=TRUE}
+# Changes all "NHS Trust" to "Trust"
+region1_df$`Sending/feeder laboratory name` <- gsub('NHS Trust', 'Trust', region1_df$`Sending/feeder laboratory name`)
+
+# Changes all "Positive" and "Negative" to upper cases
+region1_df[,7]<-lapply(region1_df[,7], toupper)
+
+# Changes all "Inpatient" to "IP"
+region1_df[,8] <- replace(region1_df[,8], region1_df[,8]=="Inpatient", "IP")
+
+# Changes all "Outpatient" to "OP"
+region1_df[,8] <- replace(region1_df[,8], region1_df[,8]=="Outpatient", "OP")
+
+# Changes all "Unknown" in  to "NA"
+region1_df[,8] <- replace(region1_df[,8], region1_df[,8]=="Unknown", NA)
+
+# Views unique list of Region 1 data frame to validate changes
+##unique_list3 <- lapply(region1_df[,6:10], unique)
+##unique_list3
+```
+
+**In the Region 2 dataset:**
+
+It was assumed that since "EH" and "HPT" are sample collection points and are linked to Public Health England, these values could be designated at "PHE" in the *Requesting_organization* and *Setting* column in the Region 2 data frame. Data collection was less granular in the Region 1 data set. It appeared to bucket EH and HPT as PHE in the matching *Sending/feeder laboratory name* column of the Region 1 dataset. This furthered supported this decision.
+
+Other adjustments made in the Region 2 dataset included:
+
+1. All "Negative" values were made uppercase
+
+2. All "FAE", "VOM" and "MISC" were designated "Faeces", "Vomit" and "Miscellaneous"
+
+These transformations occurred as follows:
+
+```{r A4-2, echo=TRUE}
+# Changes all "Negative" to "NEGETIVE"
+region2_df[,6] <- replace(region2_df[,6], region2_df[,6]=="Negative", "NEGATIVE")
+
+# Changes all "EH" to "PHE"
+region2_df[,8] <- replace(region2_df[,8], region2_df[,8]=="EH", "PHE")
+
+# Changes all "HPT" to "PHE"
+region2_df[,8] <- replace(region2_df[,8], region2_df[,8]=="HPT", "PHE")
+
+# Change all "FAE" to "Faeces"
+region2_df[,2] <- replace(region2_df[,2], region2_df[,2]=="FAE", "Faeces")
+
+# Change all "VOM" to "Vomit"
+region2_df[,2] <- replace(region2_df[,2], region2_df[,2]=="VOM", "Vomit")
+
+# Change all "MISC" to "Miscellaneous"
+region2_df[,2] <- replace(region2_df[,2], region2_df[,2]=="MISC", "Miscellaneous")
+
+# Change "EH" to "PHE" in settings
+region2_df[,9] <- replace(region2_df[,9], region2_df[,9]=="HPT", "PHE")
+
+# Change "HPT" to "PHE" in settings
+region2_df[,9] <- replace(region2_df[,9], region2_df[,9]=="EH", "PHE")
+
+# Views unique list of Region 2 data frame to validate changes
+##unique_list4 <- lapply(region2_df[c(2,6,7,8,9,10)], unique)
+##unique_list4
+```
+
+#### Renaming columns
+
+"CamelCaps" were used to name columns making them readable without white-space and was used as the convention with all output data. The renaming of columns was is done with the **dplyr** package as follows:
+
+```{r A5, echo=TRUE}
+# Renames columns on Region 1 data frame using the "dplyr" package.
+
+region1_df <- region1_df %>% 
+  rename(
+    PID = 'Anonymised patient ID',
+    SampleDate = 'Sample date',
+    ReceivedDate = 'Receipt date at PHL',
+    ReportDate = 'PHL laboratory report date',
+    SampleType = 'Sample type',
+    RequestBy = 'Sending/feeder laboratory name',
+    Result = 'Pathogen X result',
+    InOutPatient = 'Inpatient/outpatient indicator',
+    PrimaryDiagnostic = 'Primary diagnostic',
+    Referral = 'Referral sample',
+    RegionCode = 'Region Code' 
+  )
+
+# Renames columns on Region 2 data frame using the "dplyr" package.
+
+region2_df <- region2_df %>% 
+  rename(
+    PID = Ano_pt_ID,
+    SampleDate = Spec_date,
+    ReceivedDate = Receipt_date,
+    ReportDate = Report_date,
+    SampleType = Spec_type,
+    RequestBy = Requesting_organisation,
+    InOutPatient = Inpt_outpt_indicator,
+    RegionCode = region_code
+  )
+```
+
+#### Assumptions: addings columns and adjusting values
+
+Rather than dropping columns that had incomplete or irregular data values, I opted to modify and create new columns retaining value details that otherwise would have been lost. I afforded myself this liberty because these columns were not critical to the six assigned tasks. However, these mutated and imputed columns were potentially useful in other analysis - if all assumptions made remain true - or at the very least, was useful to provide a proof of concept to methods for analysis additionally considered in this assignment (i.e. machine learning to predict outcomes). These mutations were implemented before and after the dataset merge step.
+
+In the first mutation steps, a **Setting** column was added to the Region 1 datafram. Values were imputed in this based on corresponding values in other columns. For instance, all occurrences of "HPT/EH" in the in and out patient indicator column were designated as "PHE" in the new **Setting** column. This was done for simplicity. Similarly, using the InOutPatient column as reference, the new Setting column was modified as:
+
+1. All "GP" were designated as "GP"
+
+2. All "IP" were designated as "Hospital"
+
+3. All "OP" were designated as "Hospital"
+
+4. All "AE" were designated as "Hospital"
+
+At the end of these mutation steps for the Region 1, six levels were created.
+
+1. GP - sources from community hospitals or visits through GPs 
+
+2. HPT/EH - sourced from PHE channels
+
+3. Hospital - sourced from Trusts
+
+4. CM - sourced from the community through CMs
+
+5. Prisons - sourced from HMP
+
+6. NA - undefined sources
+
+These maintained most of the information potentially lost in modifying values other columns (e.g the **InOutPatient** column) in the next steps which was transformed to contain the following levels:
+
+1. OP - No stay patients. GPs, CMs and HPT/EH are assumed to all fall in this category
+
+2. IP - Hospitalized patients
+
+3. NA - couldn't be determined
+
+4. AE - Which could be either OP or IP. 
+
+A **Referral** and **PrimaryDiagnostic** columns were also added to the Region 1 data frame for uniformity. In the Referral column it is assumed all GP and CM are referred to a hospital or PHE testing laboratory. The Requesting_organization in the Region 1 dataframe and the Sending/feeder laboratory name in the Region 2 dataframe was organized to hold the following levels:
+
+1. "PHE" - for tests requested by the PHE, HPT or EH
+
+2. "Trust" X - for tests requested by a Trust
+
+3. "GP" - for tests requested by a GP or CM
+
+4. Unknown - Unknown Trust since all in this category was designated "Hospital" in the Setting column in the original dataset
+
+5. HMP - for tests requested from confinement.
+
+The column modifications in the Region 1 dataframe were as follows:
+
+```{r A6, echo=TRUE}
+# Creates new "Setting" column in data frame
+region1_df$Setting <- NA
+
+# Creates "HPT/EH" value in "Setting" column based on InOutPatient column value.
+region1_df <- region1_df %>%
+  mutate(Setting = replace(Setting, InOutPatient == "HPT/EH", "PHE"))
+
+# Creates "GP" value in "Setting" column based on InOutPatient column value.
+region1_df <- region1_df %>%
+  mutate(Setting = replace(Setting, InOutPatient == "GP", "GP"))
+
+# Creates "Hospital" value in "Setting" column based on InOutPatient column value.
+region1_df <- region1_df %>%
+  mutate(Setting = replace(Setting, InOutPatient == "IP", "Hospital"))
+
+# Creates "Hospital" value in "Setting" column based on InOutPatient column value.
+region1_df <- region1_df %>%
+  mutate(Setting = replace(Setting, InOutPatient == "OP", "Hospital"))
+
+```
+
+In line with earlier assumptions, all values corresponding to the "PHE" in the **RequestBy** column, were designated "HPT/EH" in the **InOutPatient** column in the Region 2 dataframe. "GP" values were similarly assigned. In addition to these, a new **PrimaryDiagnostic** and **Referral** column was created in the Region 2 dataframe.
+
+Creating the new columns and editing In-Out Patient Indicator in the Region 2 dataframe was done as follows:
+
+```{r A7, echo=TRUE}
+# Creates new "Primary Diagnostic" column in data frame
+region2_df$PrimaryDiagnostic <- NA
+
+# Creates new "Referral" column in data frame
+region2_df$Referral <- NA
+
+# Replaces all values in the "InOutPatient" column to "HPT/EH" based on the value in "RequestBy" column
+region2_df <- region2_df %>%
+  mutate(InOutPatient = replace(InOutPatient, RequestBy == "PHE", "HPT/EH"))
+
+# Replaces all values in the "InOutPatient" column to "GP" based on the value in "RequestBy" column
+region2_df <- region2_df %>%
+  mutate(RequestBy = replace(RequestBy, Setting == "GP", "GP"))
+```
+
+#### Date reformatting
+
+Only the Region 1 dataframe date columns required this. The default *YY-MM-DD* date format was used predominantly as a convention for date representation in this analysis.
+
+```{r A8, echo=TRUE}
+# Reformats date columns in Region 1 dataframe to default YY-MM-DD format
+
+region1_df$SampleDate<-format(as.Date(as.numeric(region1_df$SampleDate), origin = "1899-12-30"), "%Y-%m-%d")
+region1_df$ReceivedDate<-format(as.Date(as.numeric(region1_df$ReceivedDate), origin = "1899-12-30"), "%Y-%m-%d")
+region1_df$ReportDate<-format(as.Date(as.numeric(region1_df$ReportDate), origin = "1899-12-30"), "%Y-%m-%d")
+
+```
+
+#### Harmonizing column types
+**PID** columns in Region 1 and Region 2 dataframes were character and integer types respectively which are incompatible in a merge. This was adjusted as follows:
+
+```{r A9, echo=TRUE}
+# Converts "PID" column from integer to character necessary for merge
+region2_df$PID<-as.character(region2_df$PID)
+```
+
+#### The Merge
+The merge was done in the following chunk:
+
+```{r A10, echo=TRUE}
+# Merges Region 1 and Region 2 dataframes as "merged_data"
+merged_data <- bind_rows(region1_df,region2_df)
+
+```
+
+#### Additional post-merge column mutations
+
+Post-merge modifications in line with earlier assumptions were made as follows:
+
+```{r A11, echo=TRUE}
+#Changes all values in "Setting" column to CM" based on corresponding "CM" value in "InOutPatient" column
+merged_data_preview <- merged_data %>%
+  mutate(Setting = replace(Setting, InOutPatient == "CM", "CM"))
+
+#Changes all values in "Setting" column to "HPT" based on corresponding "HPT" value in "InOutPatient" column
+merged_data_preview <- merged_data_preview %>%
+  mutate(Setting = replace(Setting, InOutPatient == "HPT/EH", "HPT/EH"))
+
+#Changes all  "GP", "CM", "HTP/EH" to "OP" InOutPatient
+merged_data_preview <- merged_data_preview %>%
+  mutate(InOutPatient = replace(InOutPatient, InOutPatient == "HPT/EH", "OP"))
+merged_data_preview <- merged_data_preview %>%
+  mutate(InOutPatient = replace(InOutPatient, InOutPatient == "GP", "OP"))
+merged_data_preview <- merged_data_preview %>%
+  mutate(InOutPatient = replace(InOutPatient, InOutPatient == "CM", "OP"))
+
+#Changes all corresponding "Setting" column "GP" and "CM" value to "Yes" in "Referral" column.
+merged_data_preview <- merged_data_preview %>%
+  mutate(Referral = replace(Referral, Setting == "CM", "Yes"))
+merged_data_preview <- merged_data_preview %>%
+  mutate(Referral = replace(Referral, Setting == "GP", "Yes"))
+
+##Writes out preview document to verify changes have been made.
+##write.csv(merged_data_preview, "preview.csv")
+```
+
+## Deduplication of rows
+
+The second of the six tasks requires the removal of duplicate rows in the dataset keeping the earliest test result of patient. A patient is identified by speciment ID in the **PID** column. Duplicate rows are first ordered by date and repeat tests after the first are removed in the follow chunk.
+
+```{r B1-1, echo=TRUE}
+cleaned_data <- merged_data_preview %>%
+  group_by(PID) %>% distinct(SampleDate = min(SampleDate), .keep_all = TRUE)
+```
+
+A "cleaned" (.csv) dataset was written and output in the project folder.
+
+```{r B1-2, echo=TRUE}
+write.csv(cleaned_data, "../output/data/cleaned.csv")
+```
+
+The column names are defined in the table below:
+
+```{r B1-3, echo=TRUE}
+# Displays table using the formattable package
+abbr <- data.frame(
+  SN = 1:12,
+  Columns = c(
+    "PID",
+    "SampleDate",
+    "ReceivedDate",
+    "ReportDate",
+    "SampleType", 
+    "RequestBy",
+    "Result",
+    "InOutPatient",
+    "PrimaryDiagnostic",
+    "Referral",
+    "RegionCode",
+    "Setting"),
+  
+  Definition = c(
+    "Patient ID",
+    "Date of sample collection",
+    "Date sample recieved at testing lab",
+    "Date result is confirmed",
+    "Sample type",
+    "Requestion organization, sending or feeder laboratory",
+    "Result outcome",
+    "In-out patient indicator",
+    "If primary diagnosis",
+    "If referred",
+    "Region code",
+    "Setting"),
+  stringsAsFactors = FALSE)
+
+formattable(abbr, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+```
+
+## UK population data source selection
+
+The region were decoded from the Office for National Statistics website Atlas found from  [statistics.data.gov.uk](statistics.data.gov.uk). The [Data Commons](http://datacommons.org) resource website was used as the primary source for the population data for **North West England** (E12000002) and **East Midlands** (E12000004) regions. Data Commons is an open knowledge repository that combines data from worldwide public datasets published freely supporting repeatable, reproducible and open research. This formed my rationale for choosing this as a datasource.
+Respective datasets for both regions were downloaded and stored in the project folder. It was however noted that population data were lacking for 2020 from these. However, missing data for 2020 for both regions was imputed with forecasted data from the Statista Business Platform's Population Forcast-2041 for the [East Midlands](https://www.statista.com/statistics/378998/east-midlands-population-forecast/) and [North West England](https://www.statista.com/statistics/378993/north-west-england-population-forecast/) (UK) estimated at 4,846,100 and 7,333,500 respectively for that year.
+
+```{r C1, echo=TRUE}
+# Population data sets sourced from www.datacommons.org
+popstat1_df <- read.csv("../data/north-west-england-E12000002.csv", sep = ",", quote="\"")
+popstat2_df <- read.csv("../data/east-midlands-E12000004.csv", sep = ",", quote="\"")
+
+# Previews table headers Region 1 Population dataset 
+head(popstat1_df, 4)
+# Previews structure of Region 1 population dataset
+str(popstat1_df)
+# Previews table headers Region 2 Population dataset
+head(popstat2_df, 4)
+# Previews structure of Region 2 population dataset
+str(popstat2_df)
+```
+
+## Positive infection counts
+For the 4th of the six tasks, a Postive Infection Count epidemic curve was plotted using the **incidence2** package. The data preparation steps for this plot included subsetting only positive rows from the harmonised dataset. This step and the plot are as follows:
+
+```{r C2-1, echo=TRUE}
+# Subsets rows only positive results
+positive_data <- cleaned_data[which(cleaned_data$Result == "POSITIVE"), ]
+
+positive_data <- as.data.frame(positive_data)
+
+# Creates incident line list
+j <- incidence(positive_data, date_index = ReportDate)
+
+# Plots year-weekly positivity epi-curve
+j <- incidence(positive_data, date_index = ReportDate, interval = 7)
+plot(j, n_breaks = 3)
+```
+
+Though the plot shows a general decline from 2016, periodical "winter" peaks and "summer" each year can be seen here.
+
+In addition to this, plots were also created to visualize the data grouped by **Setting** and **RegionCode**.
+
+```{r C2-2, echo=TRUE}
+# Plots year-weekly positivity epi-curve disaggregated by setting 
+j_7g <- incidence(positive_data, date_index = ReportDate, interval = 7, groups = Setting)
+plot(j_7g,  n_breaks = 3, fill = Setting)
+
+```
+
+This plot shows a greater amount of positive cases came from GP and Trust settings rather than from PHE routes, insight that might be useful in the allocation of case detection resources.
+
+```{r C2-3, echo=TRUE}
+# Plots year-weekly positivity epi-curve disaggregated by Region
+j_7r <- incidence(positive_data, date_index = ReportDate, interval = 7, groups = RegionCode)
+plot(j_7r,  n_breaks = 3, fill = RegionCode)
+
+```
+
+This plot show a greater amount of positive cases came from North West England (E12000002). However, a lot more tests were carry out in that region compared to The East Midlands (E12000004), thus an argument can be made that case detection was limited in the latter. Regional positive rates below should further verified this.
+
+## Positive infection rates
+In the 5th task, positive infection rates per year can be calculated as the ratio of the product of the **number of positives** and **100000**, to the **estimated population** of the region in that **year**. This is expressed in the formula below:
+
+$$
+ \frac{N_{pathogen X/year} * 100,000}{N_{year} }  
+$$
+The table summarises the estimated population from the source data.
+
+```{r D1-1, echo=TRUE}
+# Adds and populates a 'Region' column population data.
+popstat1_df$regioncode <- "E12000002"
+popstat2_df$regioncode <- "E12000004"
+
+# Renames the population data field in both
+lb1 <- labels(popstat1_df)[[2]][2]
+lb2 <- labels(popstat2_df)[[2]][2]
+
+popstat1_df <- popstat1_df %>% rename(population = lb1[1])
+
+popstat2_df <- popstat2_df %>% rename(population = lb2[1])
+
+# Merges popstat1_df and popstat2_df to a single popdata dataframe
+popdata <- bind_rows(popstat1_df, popstat2_df)
+
+# Formats the date to display year only
+popdata$date <- as.Date.character(popdata$date, "%Y")
+
+popdata$date <- format(as.Date(popdata$date), "%Y")
+
+# Creates a years Incidence Object for incident plot group by regions code
+j_365 <- incidence(positive_data, date_index = ReportDate, interval = 365, groups = RegionCode)
+
+# Creates and populates a population column on the line list
+jp <- j_365
+
+jp$Population <- NA
+
+# Formats date on line list to display year only
+jp$bin_date <- format(as.Date(jp$bin_date), "%Y")
+
+# Populates population column in Incidence Object
+jp$Population <- popdata[match(jp$bin_date, popdata$date), 2]
+
+# Imputes forecasted population values in incident object
+jp$Population[9] <- 7333500
+jp$Population[10] <- 4846100
+
+
+# Populates Rates column with calculated Positivity Rates
+jp$Rates <- (jp$count * 1e+05)/jp$Population
+
+# Converts line list (incidence2 object) to dataframe for 'dplyr' label
+# adjustments
+jp <- as.data.frame(jp)
+
+# Tidies up column names using 'dplyr' package
+jp <- jp %>% rename(Date = bin_date, Count = count)
+
+# Displays table using formattable package
+formattable(jp, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+```
+
+Plotting the positive rates group by year per region:
+
+```{r D1-2, echo=TRUE}
+# Plots positive rates as bars per year grouped by region
+
+p <- ggplot(jp, aes(fill = RegionCode, x = Date, y = Rates, width = 0.64)) + geom_bar(stat = "identity", 
+    position = "dodge") + xlab("Year") + ylab("Positivity Rates (per 100,000)")
+
+p
+```
+
+The positive rates suggest fewer positive cases occur in the East Midlands which does not support the limited testing hypothesis mentioned above. It is noteworthy to mention the differences in decline trends i.e. the positive rates in the East Midlands remained relatively unchanged until 2020 in contrast to North West England that started declining after the first year of the outbreak measurement in 2016. In both regions, the positive infection rates approach zero in 2020.
+
+## Summary statistics for reporting delays
+
+Finally, summary statistics of the time taken from specimen collection to test reporting (i.e. the testing turnaround time or TAT) were calculated and presented in a tables by **Trusts** and by **Sample Type** as follows:
+
+```{r E1-1, echo=TRUE}
+
+# Creates a TAT table subset of the cleaned dataset from Chunk C1 
+tat_df <- cleaned_data[,1:6]
+
+# Calculates time intevals between SampleDate and ReceivedDate (T1), and ReceivedDate and ReportDate (T2)
+report_date<- as.Date(tat_df$ReportDate)
+receive_date<- as.Date(tat_df$ReceivedDate)
+sample_date<- as.Date(tat_df$SampleDate)
+
+tat_df$T1 <- receive_date - sample_date
+tat_df$T2 <- report_date - receive_date
+
+# Remove rows with "Unknown", "PHE", "HMP" and "GP" values in the *RequestBy* column
+tat_df2<-tat_df[!(tat_df$RequestBy =="Unknown" | tat_df$RequestBy == "HMP" | tat_df$RequestBy == "GP" | tat_df$RequestBy == "PHE"),]
+
+# Creates TAT subsets for Trusts and sample summary  
+trusts_tat_df <- tat_df2[,6:8]
+sample_tat_df <- tat_df[c(5,7,8)]
+
+# Creates summary by trusts
+trust_summary_df<-trusts_tat_df %>%
+  group_by(RequestBy) %>%
+  summarise(
+    n = n(),
+    max = max(T1+T2),
+    min = min(T1+T2),
+    median = median(T1+T2),
+    mean = mean(T1+T2),
+    sd = sd(T1+T2)
+  )
+
+#Tidies up column names on the summary table
+trust_summary_df<-trust_summary_df %>% rename(
+    Trust = RequestBy,
+    Count = n,
+    Max = max,
+    Min = min,
+    Median = median,
+    Mean= mean,
+    SD = sd
+)
+
+formattable(trust_summary_df, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+# Creates summary by samples
+sample_summary_df<-sample_tat_df %>%
+  group_by(SampleType) %>%
+  summarise(
+    n = n(),
+    max = max(T1+T2),
+    min = min(T1+T2),
+    median = median(T1+T2),
+    mean = mean(T1+T2),
+    sd = sd(T1+T2)
+  )
+
+#Tidies up column names on the summary table
+sample_summary_df<-sample_summary_df %>% rename(
+  Sample = SampleType,
+  Count = n,
+  Max = max,
+  Min = min,
+  Median = median,
+  Mean= mean,
+  SD = sd
+)
+
+formattable(sample_summary_df, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+```
+
+In addition to the summary statistics presented above, an ordered plot of stacked bars for **medians** (medians are less sensitive to outliers than means) grouped by trust was done for further insights.
+
+```{r E1-2, echo=TRUE}
+
+# Creates tables subset from tat_df aggregate by median
+trusts_tat2_df<-aggregate(tat_df2[, 7:8], list(tat_df2$RequestBy), median)
+
+# Tidies names of column on the dataset
+trusts_tat2_df<-trusts_tat2_df %>% rename(Trust = Group.1)
+
+#Plot for medians to find out who where extended times are
+d<-trusts_tat2_df
+
+# Prepares dataset for **ggplot**
+d<-melt(d, 
+        direction = "long",
+        varying = list(names(d)[2:3])
+        )
+# Changes the value column to an integer for **ggplot**
+d$value<- as.integer(d$value)
+
+# Tidies column names on dataset
+d <- d %>% rename(
+  Period = variable,
+  Days = value
+)
+
+# Plot stacked bars grouped by Trusts summarized by medians
+p<-ggplot(data=d, aes(x=reorder(Trust, Days), y=Days, fill=Period))
+p<-p+geom_bar(stat="identity")
+p<-p+scale_fill_brewer(palette="Paired")+theme_minimal()
+p<-p+geom_text(aes(y=Days, label=Days), vjust=1.75, color="white", size=3)
+p<-p+theme(axis.text.x = element_text(angle = 90))
+p<-p+labs(x = "Trusts", y = "Median Days")
+p
+```
+Where **T1** = Time taken for a sample collected to reach the lab  and **T2** = the time taken for a sample to be tested and reported.
+
+In the above plot:
+
+1. Trust 8 (n=8) shows the shortest sample-report conversion TAT of 1 day with no day lost between sample collection and testing.
+
+2. Trust 13 (n=1) shows the longest sample-report conversion TAT of 10days, with the period of sample testing to reporting 9 of those days.
+
+However, support or interventions are better focused on laboratories with a high throughput (arbitrarily defined with number of test > 100) which generally have shorter TAT as viewed below:
+
+```{r E1-3, echo=TRUE}
+# Subsets Trust with laboratory test > 100
+b <- trust_summary_df[(trust_summary_df$Count > 100), ]
+b <- b[,c(1,2,5)]
+
+formattable(b, align = c("c", rep("l", NCOL(abbr) - 1)))
+```
+
+Trusts with total turnaround times > 2 days can be assumed to handle referral samples with added time from processes required in transfer. This can be verified by cross-checking these Trust against Referral data. Unfortunately, referral information was only captured in Region 1 dataset i.e. for North West England.
+
+```{r E1-4, echo=TRUE}
+# Subsets Trust handling referrals
+c <- cleaned_data[which(cleaned_data$Referral == "Yes"), ]
+c <- as.data.frame(c[,c(6,10,11)])
+
+# Subset North West England
+c<- c[which(c$RegionCode == "E12000002"),]
+
+# Remove duplicates
+c <- c %>%
+  group_by(RequestBy) %>% distinct(Referral = "Yes", .keep_all = TRUE)
+
+
+# Creates dataset of Trusts in Region 1 with TAT > 2 days
+e <- trusts_tat2_df
+e$TAT <- e$T1+e$T2
+e <- e[,c(1,4)]
+e <- e[which(e$TAT > 2),]
+
+# Fixes row numbering
+rownames(e) <- 1:nrow(e)
+
+# Adds "Is Referred" column to High-throughput Trust table
+e$`Is Referred?`<- (e$Trust %in% c$RequestBy)
+
+# Prints out table with **formattable** package
+formattable(e, align = c("c", rep("l", NCOL(abbr) - 1)))
+
+```
+15 distinct sites handled referred samples. This table shows that 9 Trusts of these have TAT > 2 days. If referral assumption made above is true, this might suggest referrals may affect TAT, at least in this region.
+
+## Other analysis
+
+Machine learning may be a little far-fetched considering the limits to the data, but it is useful in discovering patterns in the data that are not readily apparent. For the purpose of this additional task, it is assumed:
+
+1. The **InOutPatient** is a *lagging indicator* i.e. The patients is admitted, if at all, days after a test report.
+
+2. Patients symptoms can be strictly be classified into those who present with *vomiting* or *diarrhoea.*
+
+3. Treatment is limited to only when tests results *are confirmed.*
+
+For this task, hypothetical question will be:
+
+*"Do symptoms (as judged by specimen sample), primary diagnosis, and TAT predict the hospitalization of patients after being confirmed positive?"*
+
+caveats to this task are:
+
+1. Only Hospital settings are considered from the **cleaned** dataset (to eliminate bias from PHE, HMP, GPs and CMs which are linked to the **InOutPatient** column)
+
+2. As mentioned before, only one region (Region 1) was used in this analysis (Region 2 doesn't have information in the Primary Diagnostic column).
+
+3. Only basic machine learning steps were carried out, the object to demonstrate as a proof of concept. Usually several other model fine-tuning steps and considerations are made to optimize results. 
+
+To perform this task:
+
+1. The data was prepared
+
+2. Validation parameters were defined
+
+3. Various models were trained
+
+4. A model was selected based on accuracy
+
+5. Prediction accuracy was validated
+
+6. A variable importance was determined.
+
+The **caret** package was used to implement this.
+
+#### Data Preparation
+
+The model training and vaidation datasets were created from the **cleaned** dataset as follows:
+
+```{r F1-1, echo=TRUE}
+# Prepares the data
+ml_data <- cleaned_data
+ml_data$TAT <- (report_date - sample_date)
+ml_data <- ml_data[c(5,7,9,12,13, 8)]
+ml_data <- ml_data[ which(ml_data$Result=='POSITIVE'), ]
+ml_data <- ml_data[ which(ml_data$Setting=='Hospital'), ]
+ml_data <- ml_data[(ml_data$InOutPatient == "OP" | ml_data$InOutPatient == "IP"), ]
+ml_data[,3][is.na(ml_data[, 3])] <- "No"
+
+ml_data <- ml_data[complete.cases(ml_data), ]
+ml_data <- as.data.frame(ml_data[,c(1,3,5,6)])
+
+ml_data$SampleType <- as.factor(ml_data$SampleType)
+ml_data$PrimaryDiagnostic <- as.factor(ml_data$PrimaryDiagnostic)
+ml_data$InOutPatient <- as.factor(ml_data$InOutPatient)
+ml_data$TAT <- as.numeric(ml_data$TAT)
+
+# Creates Testing and Validation Datasets
+validation_index <- createDataPartition(ml_data$InOutPatient, p=0.80, list=FALSE)
+# select 20% of the data for validation
+validation <- ml_data[-validation_index,]
+# use the remaining 80% of data to training and testing the models
+dataset <- ml_data[validation_index,]
+
+```
+
+#### Validation parameters
+
+A 10-fold cross-validation rule was set. This was to check overfitting i.e. failure to generalize patterns discovered by the model. Accuracy was the only the metric used to measure the performance of the models.
+
+```{r F2, echo=TRUE}
+
+# Set for a 10-fold cross-validation
+control <- trainControl(method="cv", number=10)
+metric <- "Accuracy"
+
+```
+
+#### Training of various models
+
+5 different models were trained. This included:
+
+1. LDA - Linear Discriminant Analysis
+
+2. CART - Classification and Regression Tree
+
+3. KNN - K-Nearest Neighbour
+
+4. SVM - Support Vector Machine
+
+5. Random Forest
+
+```{r F3, echo=TRUE}
+# a) linear algorithms
+set.seed(7)
+fit.lda <- train(InOutPatient~., data=dataset, method="lda", metric=metric, trControl=control)
+# b) nonlinear algorithms
+# CART
+set.seed(7)
+fit.cart <- train(InOutPatient~., data=dataset, method="rpart", metric=metric, trControl=control)
+# kNN
+set.seed(7)
+fit.knn <- train(InOutPatient~., data=dataset, method="knn", metric=metric, trControl=control)
+# c) advanced algorithms
+# SVM
+set.seed(7)
+fit.svm <- train(InOutPatient~., data=dataset, method="svmRadial", metric=metric, trControl=control)
+# Random Forest
+set.seed(7)
+fit.rf <- train(InOutPatient~., data=dataset, method="rf", metric=metric, trControl=control)
+
+```
+
+#### Model grading and selection
+
+Model grading was performed with the following code:
+
+```{r F4-1, echo=TRUE}
+# summarizes accuracy of models
+results <- resamples(list(lda=fit.lda, cart=fit.cart, knn=fit.knn, svm=fit.svm, rf=fit.rf))
+summary(results)
+
+```
+
+The most accurate is a KNN (K-Nearest Neighbour) model (mean = 83%, Max = 85%).
+
+```{r F4-2, echo=TRUE}
+# Summarizes the KNN model
+print(fit.knn)
+
+```
+
+It should be noted that all models performed just as well.
+
+#### Making Predictions
+
+In a final step, the selected model was tested against the naive validation dataset and scored.
+
+```{r F5, echo=TRUE}
+# estimate skill of KNN on the validation dataset
+predictions <- predict(fit.knn, validation)
+confusionMatrix(predictions, validation$InOutPatient)
+
+```
+
+The accuracy of the model in predicting whether a patient will be hospitalized based on the features in the data set is 83.05% with a 95% C.I. with a significant P value (at least based on this data).
+
+#### Variable Importance
+
+Probably more relevant than the predictive model are insights on what variables are important in predicting hospitalizations.
+
+```{r F6, echo=TRUE}
+# Calculates variable importance
+importance <- varImp(fit.knn, scale=FALSE)
+print(importance)
+plot(importance)
+```
+TAT is shown to have the highest influence on the model.
+
+## Conclusion
+
+The above markdown performed tasks to clean and append the two given infection dataset which was de-duplicate and merged. An appropriate UK population data sourced and used to present the positive infection counts as a weekly Epidemiological Curves per year. Positive infection rates per 100,000 population per year and region were calculated and visualize. Summary statistics for reporting delays between sample and reporting dates by NHS Trust and specimen type. In addition to this, a Machine learning Model was built as a proof of concept and to determine feature importance to predict hospitalizations from the dataset based on assumptions made.
