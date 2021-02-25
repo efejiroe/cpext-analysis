@@ -709,7 +709,7 @@ b <- b[,c(1,2,5)]
 formattable(b, align = c("c", rep("l", NCOL(abbr) - 1)))
 ```
 
-Trusts with total turnaround times > 2 days can be assumed to handle referral samples with added time from processes required in transfer. This can be verified by cross-checking these Trust against Referral data. Unfortunately, referral information was only captured in Region 1 dataset i.e. for North West England.
+Trusts with total turnaround times > 2 days can be assumed to handle referral samples with added time from processes required in transfer. This can be verified by cross-checking these Trust against Referral data. Unfortunately, referral information was only captured in Region 1 dataset i.e. for North West England. If no Trust in Region 2 handled referral samples, the follow chunks shows all Trusts with TAT > 2 days handled referred samples.
 
 ```{r E1-4, echo=TRUE}
 # Subsets Trust handling referrals
